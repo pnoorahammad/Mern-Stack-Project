@@ -54,10 +54,22 @@ const CreateEvent = () => {
 
       navigate('/dashboard');
     } catch (error) {
+      console.error('Create event error:', error);
       const errorMessage = error.response?.data?.message || 
+                          error.response?.data?.error ||
                           error.response?.data?.errors?.[0]?.msg || 
                           'Failed to create event. Please try again.';
-      setError(errorMessage);
+      
+      // Show more detailed error if available
+      let fullError = errorMessage;
+      if (error.response?.data?.hint) {
+        fullError += ` (${error.response.data.hint})`;
+      }
+      if (error.response?.data?.code) {
+        fullError += ` [Code: ${error.response.data.code}]`;
+      }
+      
+      setError(fullError);
     } finally {
       setLoading(false);
     }

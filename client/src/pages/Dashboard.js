@@ -97,7 +97,7 @@ const Dashboard = () => {
         ) : (
           <div className="events-grid">
             {events.map((event) => (
-              <div key={event._id} className="event-card card">
+              <div key={event.id || event._id} className="event-card card">
                 {event.image && (
                   <img 
                     src={getImageUrl(event.image)} 
@@ -123,20 +123,20 @@ const Dashboard = () => {
                       <FiMapPin /> {event.location}
                     </span>
                     <span>
-                      <FiUsers /> {event.attendees.length} / {event.capacity}
+                      <FiUsers /> {event.attendeesCount || event.attendees?.length || 0} / {event.capacity}
                     </span>
                   </div>
                   <div className="card-actions">
-                    <Link to={`/events/${event._id}`} className="btn btn-primary">
+                    <Link to={`/events/${event.id || event._id}`} className="btn btn-primary">
                       View Details
                     </Link>
                     {activeTab === 'created' && (
                       <>
-                        <Link to={`/events/${event._id}/edit`} className="btn btn-secondary">
+                        <Link to={`/events/${event.id || event._id}/edit`} className="btn btn-secondary">
                           <FiEdit /> Edit
                         </Link>
                         <button
-                          onClick={() => handleDelete(event._id)}
+                          onClick={() => handleDelete(event.id || event._id)}
                           className="btn btn-danger"
                         >
                           <FiTrash2 /> Delete

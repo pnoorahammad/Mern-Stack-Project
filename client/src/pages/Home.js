@@ -79,7 +79,7 @@ const Home = () => {
         ) : (
           <div className="events-grid">
             {filteredEvents.map((event) => (
-              <div key={event._id} className="event-card card">
+              <div key={event.id || event._id} className="event-card card">
                 {event.image && (
                   <img 
                     src={getImageUrl(event.image)} 
@@ -105,10 +105,10 @@ const Home = () => {
                       <FiMapPin /> {event.location}
                     </span>
                     <span>
-                      <FiUsers /> {event.attendees.length} / {event.capacity}
+                      <FiUsers /> {event.attendeesCount || event.attendees?.length || 0} / {event.capacity}
                     </span>
                   </div>
-                  <Link to={`/events/${event._id}`} className="btn btn-primary">
+                  <Link to={`/events/${event.id || event._id}`} className="btn btn-primary">
                     View Details
                   </Link>
                 </div>

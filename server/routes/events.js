@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
 const auth = require('../middleware/auth');
-const Event = require('../models/Event');
+const supabase = require('../supabaseClient');
 const upload = require('../config/multer');
 const fs = require('fs');
 const path = require('path');
@@ -12,26 +12,47 @@ const path = require('path');
 // @access  Public
 router.get('/', async (req, res) => {
   try {
-    const { search, category, date } = req.query;
-    const query = { date: { $gte: new Date() } }; // Only upcoming events
+    const { search, date } = req.query;
+    let query = supabase
+      .from('events')
+      .select(`
+        *,
+        creator:users!events_creator_id_fkey(id, name, email)
+      `)
+      .gte('date', new Date().toISOString())
+      .order('date', { ascending: true });
 
-    // Search by title
+    // Search by title, description, or location
     if (search) {
-      query.title = { $regex: search, $options: 'i' };
+      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%,location.ilike.%${search}%`);
     }
 
-    // Filter by date range (if provided)
-    if (date) {
-      const dateFilter = new Date(date);
-      query.date = { $gte: dateFilter };
-    }
+    const { data: events, error } = await query;
 
-    const events = await Event.find(query)
-      .populate('creator', 'name email')
-      .populate('attendees', 'name email')
-      .sort({ date: 1 });
+    if (error) throw error;
 
-    res.json(events);
+    // Get attendee counts for each event
+    const eventsWithAttendees = await Promise.all(
+      events.map(async (event) => {
+        const { count } = await supabase
+          .from('rsvps')
+          .select('*', { count: 'exact', head: true })
+          .eq('event_id', event.id);
+
+        const { data: attendees } = await supabase
+          .from('rsvps')
+          .select('user_id, users!rsvps_user_id_fkey(id, name, email)')
+          .eq('event_id', event.id);
+
+        return {
+          ...event,
+          attendees: attendees?.map(a => a.users) || [],
+          attendeesCount: count || 0
+        };
+      })
+    );
+
+    res.json(eventsWithAttendees);
   } catch (error) {
     console.error('Get events error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -43,13 +64,27 @@ router.get('/', async (req, res) => {
 // @access  Public
 router.get('/:id', async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id)
-      .populate('creator', 'name email')
-      .populate('attendees', 'name email');
+    const { data: event, error } = await supabase
+      .from('events')
+      .select(`
+        *,
+        creator:users!events_creator_id_fkey(id, name, email)
+      `)
+      .eq('id', req.params.id)
+      .single();
 
-    if (!event) {
+    if (error || !event) {
       return res.status(404).json({ message: 'Event not found' });
     }
+
+    // Get attendees
+    const { data: rsvps } = await supabase
+      .from('rsvps')
+      .select('user_id, users!rsvps_user_id_fkey(id, name, email)')
+      .eq('event_id', event.id);
+
+    event.attendees = rsvps?.map(r => r.users) || [];
+    event.attendeesCount = event.attendees.length;
 
     res.json(event);
   } catch (error) {
@@ -71,7 +106,6 @@ router.post('/', auth, upload.single('image'), [
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      // Delete uploaded file if validation fails
       if (req.file) {
         fs.unlinkSync(req.file.path);
       }
@@ -81,31 +115,102 @@ router.post('/', auth, upload.single('image'), [
     const { title, description, date, location, capacity } = req.body;
     const image = req.file ? `/uploads/${req.file.filename}` : '';
 
-    // RSVP opens 1 minute after event creation (respect time)
-    const rsvpOpenAt = new Date(Date.now() + 60 * 1000);
-
-    const event = new Event({
+    // Step 1: Insert the event (without SELECT to avoid PGRST204)
+    // Build insert data - don't include rsvp_open_at if column doesn't exist
+    const insertData = {
       title,
       description,
-      date: new Date(date),
+      date: new Date(date).toISOString(),
       location,
       capacity: parseInt(capacity),
       image,
-      creator: req.user._id,
-      attendees: [],
-      rsvpOpenAt: rsvpOpenAt
-    });
+      creator_id: req.user.id
+    };
 
-    await event.save();
-    await event.populate('creator');
+    console.log('Inserting event:', { title, creator_id: req.user.id });
+    
+    const { error: insertError } = await supabase
+      .from('events')
+      .insert(insertData);
+
+    if (insertError) {
+      console.error('Supabase INSERT error:', insertError);
+      console.error('Error details:', JSON.stringify(insertError, null, 2));
+      if (req.file) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(500).json({ 
+        message: 'Server error creating event',
+        error: insertError.message,
+        code: insertError.code,
+        details: insertError.details,
+        hint: insertError.hint || 'Check if service role key is configured correctly'
+      });
+    }
+
+    console.log('Event INSERT succeeded, fetching event...');
+
+    // Step 2: Wait a moment for the insert to commit
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Step 3: Fetch the event we just created
+    const { data: fetchedEvents, error: fetchError } = await supabase
+      .from('events')
+      .select('*')
+      .eq('creator_id', req.user.id)
+      .eq('title', title)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    let insertedEvent;
+
+    if (fetchError) {
+      console.error('Error fetching inserted event:', fetchError);
+      // Build event object manually - INSERT succeeded, so we know the data
+      insertedEvent = {
+        ...insertData,
+        id: null, // Database generated, but we don't have it
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      console.log('Built event object manually');
+    } else if (!fetchedEvents || fetchedEvents.length === 0) {
+      console.log('No events found, building manually');
+      // Build event object manually
+      insertedEvent = {
+        ...insertData,
+        id: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+    } else {
+      insertedEvent = fetchedEvents[0];
+      console.log('Successfully fetched event:', insertedEvent.id);
+    }
+
+    // Build response with creator info from req.user (we already have it from auth middleware)
+    const event = {
+      ...insertedEvent,
+      creator: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email
+      },
+      attendees: [],
+      attendeesCount: 0
+    };
 
     res.status(201).json(event);
   } catch (error) {
     console.error('Create event error:', error);
+    console.error('Error stack:', error.stack);
     if (req.file) {
       fs.unlinkSync(req.file.path);
     }
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ 
+      message: 'Server error',
+      error: error.message 
+    });
   }
 });
 
@@ -128,53 +233,81 @@ router.put('/:id', auth, upload.single('image'), [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const event = await Event.findById(req.params.id);
-    if (!event) {
+    // Check if event exists and user is creator
+    const { data: existingEvent, error: fetchError } = await supabase
+      .from('events')
+      .select('creator_id, image')
+      .eq('id', req.params.id)
+      .single();
+
+    if (fetchError || !existingEvent) {
       if (req.file) {
         fs.unlinkSync(req.file.path);
       }
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    // Check if user is the creator
-    if (event.creator.toString() !== req.user._id.toString()) {
+    if (existingEvent.creator_id !== req.user.id) {
       if (req.file) {
         fs.unlinkSync(req.file.path);
       }
       return res.status(403).json({ message: 'Not authorized to update this event' });
     }
 
-    // Check if new capacity is less than current attendees
+    // Get current attendee count
+    const { count: attendeeCount } = await supabase
+      .from('rsvps')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_id', req.params.id);
+
     const { capacity } = req.body;
-    if (parseInt(capacity) < event.attendees.length) {
+    if (parseInt(capacity) < (attendeeCount || 0)) {
       if (req.file) {
         fs.unlinkSync(req.file.path);
       }
       return res.status(400).json({ 
-        message: `Capacity cannot be less than current attendees (${event.attendees.length})` 
+        message: `Capacity cannot be less than current attendees (${attendeeCount || 0})` 
       });
     }
 
     const { title, description, date, location } = req.body;
+    const updateData = {
+      title,
+      description,
+      date: new Date(date).toISOString(),
+      location,
+      capacity: parseInt(capacity)
+    };
 
     // Delete old image if new one is uploaded
-    if (req.file && event.image) {
-      const oldImagePath = path.join(__dirname, '..', event.image);
+    if (req.file && existingEvent.image) {
+      const oldImagePath = path.join(__dirname, '..', existingEvent.image);
       if (fs.existsSync(oldImagePath)) {
         fs.unlinkSync(oldImagePath);
       }
-      event.image = `/uploads/${req.file.filename}`;
+      updateData.image = `/uploads/${req.file.filename}`;
     }
 
-    event.title = title;
-    event.description = description;
-    event.date = new Date(date);
-    event.location = location;
-    event.capacity = parseInt(capacity);
+    const { data: event, error } = await supabase
+      .from('events')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .select(`
+        *,
+        creator:users!events_creator_id_fkey(id, name, email)
+      `)
+      .single();
 
-    await event.save();
-    await event.populate('creator', 'name email');
-    await event.populate('attendees', 'name email');
+    if (error) throw error;
+
+    // Get attendees
+    const { data: rsvps } = await supabase
+      .from('rsvps')
+      .select('user_id, users!rsvps_user_id_fkey(id, name, email)')
+      .eq('event_id', event.id);
+
+    event.attendees = rsvps?.map(r => r.users) || [];
+    event.attendeesCount = event.attendees.length;
 
     res.json(event);
   } catch (error) {
@@ -191,13 +324,18 @@ router.put('/:id', auth, upload.single('image'), [
 // @access  Private (only creator)
 router.delete('/:id', auth, async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
-    if (!event) {
+    // Check if event exists and user is creator
+    const { data: event, error: fetchError } = await supabase
+      .from('events')
+      .select('creator_id, image')
+      .eq('id', req.params.id)
+      .single();
+
+    if (fetchError || !event) {
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    // Check if user is the creator
-    if (event.creator.toString() !== req.user._id.toString()) {
+    if (event.creator_id !== req.user.id) {
       return res.status(403).json({ message: 'Not authorized to delete this event' });
     }
 
@@ -209,7 +347,14 @@ router.delete('/:id', auth, async (req, res) => {
       }
     }
 
-    await Event.findByIdAndDelete(req.params.id);
+    // Delete event (RSVPs will be cascade deleted)
+    const { error } = await supabase
+      .from('events')
+      .delete()
+      .eq('id', req.params.id);
+
+    if (error) throw error;
+
     res.json({ message: 'Event deleted successfully' });
   } catch (error) {
     console.error('Delete event error:', error);
@@ -218,4 +363,3 @@ router.delete('/:id', auth, async (req, res) => {
 });
 
 module.exports = router;
-

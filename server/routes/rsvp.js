@@ -1,99 +1,119 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const Event = require('../models/Event');
-const mongoose = require('mongoose');
+const supabase = require('../supabaseClient');
 
 // @route   POST /api/rsvp/:eventId
 // @desc    RSVP to an event
 // @access  Private
 router.post('/:eventId', auth, async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const { eventId } = req.params;
-    const userId = req.user._id;
+    const userId = req.user.id;
 
-    // Find event with session for transaction
-    const event = await Event.findById(eventId).session(session);
-    
-    if (!event) {
-      await session.abortTransaction();
-      session.endSession();
+    // Find event
+    const { data: event, error: eventError } = await supabase
+      .from('events')
+      .select('*')
+      .eq('id', eventId)
+      .single();
+
+    if (eventError || !event) {
       return res.status(404).json({ message: 'Event not found' });
     }
 
     // Check if event is in the past
     if (new Date(event.date) < new Date()) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({ message: 'Cannot RSVP to past events' });
     }
 
     // Check if RSVP is open (respect time - 1 minute after creation)
-    const rsvpOpenAt = event.rsvpOpenAt || new Date(event.createdAt.getTime() + 60 * 1000);
+    const rsvpOpenAt = event.rsvp_open_at ? new Date(event.rsvp_open_at) : new Date(new Date(event.created_at).getTime() + 60 * 1000);
     if (new Date() < rsvpOpenAt) {
       const waitTime = Math.ceil((rsvpOpenAt - new Date()) / 1000);
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({ 
         message: `RSVP will open in ${waitTime} seconds. Please wait at least 1 minute after event creation.` 
       });
     }
 
     // Check if user already RSVP'd
-    if (event.attendees.some(attendee => attendee.toString() === userId.toString())) {
-      await session.abortTransaction();
-      session.endSession();
+    const { data: existingRSVP } = await supabase
+      .from('rsvps')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('event_id', eventId)
+      .single();
+
+    if (existingRSVP) {
       return res.status(400).json({ message: 'You have already RSVP\'d to this event' });
     }
 
-    // Check capacity with atomic operation
-    if (event.attendees.length >= event.capacity) {
-      await session.abortTransaction();
-      session.endSession();
+    // Get current attendee count
+    const { count: attendeeCount } = await supabase
+      .from('rsvps')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_id', eventId);
+
+    // Check capacity
+    if ((attendeeCount || 0) >= event.capacity) {
       return res.status(400).json({ message: 'Event is at full capacity' });
     }
 
-    // Atomic update: Add user to attendees array only if capacity allows
-    // This prevents race conditions by using MongoDB's atomic operations
-    const updateResult = await Event.updateOne(
-      { 
-        _id: eventId,
-        attendees: { $ne: userId }, // User not already in attendees
-        $expr: { $lt: [{ $size: '$attendees' }, '$capacity'] } // Capacity check
-      },
-      { 
-        $addToSet: { attendees: userId } // $addToSet prevents duplicates
-      }
-    ).session(session);
+    // Add RSVP (atomic operation - unique constraint prevents duplicates)
+    const { data: rsvp, error: rsvpError } = await supabase
+      .from('rsvps')
+      .insert({
+        user_id: userId,
+        event_id: eventId
+      })
+      .select()
+      .single();
 
-    if (updateResult.matchedCount === 0) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ 
-        message: 'Could not RSVP. Event may be at capacity or you may have already RSVP\'d.' 
+    if (rsvpError) {
+      console.error('RSVP insert error:', rsvpError);
+      console.error('Error details:', JSON.stringify(rsvpError, null, 2));
+      // Check if it's a duplicate error
+      if (rsvpError.code === '23505') {
+        return res.status(400).json({ message: 'You have already RSVP\'d to this event' });
+      }
+      return res.status(500).json({ 
+        message: 'Server error creating RSVP',
+        error: rsvpError.message,
+        code: rsvpError.code,
+        details: rsvpError.details,
+        hint: rsvpError.hint
       });
     }
 
-    await session.commitTransaction();
-    session.endSession();
+    // Fetch updated event with attendees
+    const { data: updatedEvent } = await supabase
+      .from('events')
+      .select(`
+        *,
+        creator:users!events_creator_id_fkey(id, name, email)
+      `)
+      .eq('id', eventId)
+      .single();
 
-    // Fetch updated event
-    const updatedEvent = await Event.findById(eventId)
-      .populate('creator', 'name email')
-      .populate('attendees', 'name email');
+    const { data: rsvps } = await supabase
+      .from('rsvps')
+      .select('user_id, users!rsvps_user_id_fkey(id, name, email)')
+      .eq('event_id', eventId);
+
+    updatedEvent.attendees = rsvps?.map(r => r.users) || [];
+    updatedEvent.attendeesCount = updatedEvent.attendees.length;
 
     res.json({ 
       message: 'Successfully RSVP\'d to event',
       event: updatedEvent
     });
   } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
     console.error('RSVP error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: error.message 
+    });
   }
 });
 
@@ -103,28 +123,45 @@ router.post('/:eventId', auth, async (req, res) => {
 router.delete('/:eventId', auth, async (req, res) => {
   try {
     const { eventId } = req.params;
-    const userId = req.user._id;
+    const userId = req.user.id;
 
-    const event = await Event.findById(eventId);
-    
-    if (!event) {
-      return res.status(404).json({ message: 'Event not found' });
-    }
+    // Check if RSVP exists
+    const { data: rsvp, error: rsvpError } = await supabase
+      .from('rsvps')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('event_id', eventId)
+      .single();
 
-    // Check if user has RSVP'd
-    if (!event.attendees.some(attendee => attendee.toString() === userId.toString())) {
+    if (rsvpError || !rsvp) {
       return res.status(400).json({ message: 'You have not RSVP\'d to this event' });
     }
 
-    // Remove user from attendees
-    event.attendees = event.attendees.filter(
-      attendee => attendee.toString() !== userId.toString()
-    );
-    await event.save();
+    // Delete RSVP
+    const { error: deleteError } = await supabase
+      .from('rsvps')
+      .delete()
+      .eq('id', rsvp.id);
 
-    const updatedEvent = await Event.findById(eventId)
-      .populate('creator', 'name email')
-      .populate('attendees', 'name email');
+    if (deleteError) throw deleteError;
+
+    // Fetch updated event
+    const { data: updatedEvent } = await supabase
+      .from('events')
+      .select(`
+        *,
+        creator:users!events_creator_id_fkey(id, name, email)
+      `)
+      .eq('id', eventId)
+      .single();
+
+    const { data: rsvps } = await supabase
+      .from('rsvps')
+      .select('user_id, users!rsvps_user_id_fkey(id, name, email)')
+      .eq('event_id', eventId);
+
+    updatedEvent.attendees = rsvps?.map(r => r.users) || [];
+    updatedEvent.attendeesCount = updatedEvent.attendees.length;
 
     res.json({ 
       message: 'Successfully cancelled RSVP',
@@ -141,15 +178,50 @@ router.delete('/:eventId', auth, async (req, res) => {
 // @access  Private
 router.get('/user', auth, async (req, res) => {
   try {
-    const events = await Event.find({ 
-      attendees: req.user._id,
-      date: { $gte: new Date() }
-    })
-      .populate('creator', 'name email')
-      .populate('attendees', 'name email')
-      .sort({ date: 1 });
+    const { data: rsvps } = await supabase
+      .from('rsvps')
+      .select(`
+        event_id,
+        events!rsvps_event_id_fkey(
+          *,
+          creator:users!events_creator_id_fkey(id, name, email)
+        )
+      `)
+      .eq('user_id', req.user.id);
 
-    res.json(events);
+    const eventIds = rsvps?.map(r => r.event_id) || [];
+    
+    if (eventIds.length === 0) {
+      return res.json([]);
+    }
+
+    const { data: events } = await supabase
+      .from('events')
+      .select(`
+        *,
+        creator:users!events_creator_id_fkey(id, name, email)
+      `)
+      .in('id', eventIds)
+      .gte('date', new Date().toISOString())
+      .order('date', { ascending: true });
+
+    // Get attendees for each event
+    const eventsWithAttendees = await Promise.all(
+      (events || []).map(async (event) => {
+        const { data: eventRsvps } = await supabase
+          .from('rsvps')
+          .select('user_id, users!rsvps_user_id_fkey(id, name, email)')
+          .eq('event_id', event.id);
+
+        return {
+          ...event,
+          attendees: eventRsvps?.map(r => r.users) || [],
+          attendeesCount: eventRsvps?.length || 0
+        };
+      })
+    );
+
+    res.json(eventsWithAttendees);
   } catch (error) {
     console.error('Get user RSVPs error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -161,12 +233,32 @@ router.get('/user', auth, async (req, res) => {
 // @access  Private
 router.get('/user/created', auth, async (req, res) => {
   try {
-    const events = await Event.find({ creator: req.user._id })
-      .populate('creator', 'name email')
-      .populate('attendees', 'name email')
-      .sort({ date: 1 });
+    const { data: events } = await supabase
+      .from('events')
+      .select(`
+        *,
+        creator:users!events_creator_id_fkey(id, name, email)
+      `)
+      .eq('creator_id', req.user.id)
+      .order('date', { ascending: true });
 
-    res.json(events);
+    // Get attendees for each event
+    const eventsWithAttendees = await Promise.all(
+      (events || []).map(async (event) => {
+        const { data: eventRsvps } = await supabase
+          .from('rsvps')
+          .select('user_id, users!rsvps_user_id_fkey(id, name, email)')
+          .eq('event_id', event.id);
+
+        return {
+          ...event,
+          attendees: eventRsvps?.map(r => r.users) || [],
+          attendeesCount: eventRsvps?.length || 0
+        };
+      })
+    );
+
+    res.json(eventsWithAttendees);
   } catch (error) {
     console.error('Get user created events error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -174,4 +266,3 @@ router.get('/user/created', auth, async (req, res) => {
 });
 
 module.exports = router;
-

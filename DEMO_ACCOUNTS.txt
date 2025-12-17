@@ -1,0 +1,38 @@
+========================================
+   DEMO LOGIN ACCOUNTS
+========================================
+
+Use any of these accounts to login:
+
+1. Email: alice@example.com
+   Password: Password1!
+
+2. Email: bob@example.com
+   Password: Password2!
+
+3. Email: charlie@example.com
+   Password: Password3!
+
+4. Email: dave@example.com
+   Password: Password4!
+
+5. Email: eve@example.com
+   Password: Password5!
+
+========================================
+   WORKING URL
+========================================
+
+http://localhost:5000
+
+========================================
+   NOTES
+========================================
+
+- No MongoDB required
+- All data is in-memory (mock data)
+- Registration is disabled
+- Use demo accounts above to login
+
+========================================
+

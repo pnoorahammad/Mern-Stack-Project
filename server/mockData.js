@@ -128,17 +128,31 @@ const MockEvent = {
 };
 
 // Initialize with sample data
-const initializeMockData = () => {
-  // Create a sample user
-  const sampleUser = {
-    _id: generateId(),
-    name: 'Demo User',
-    email: 'demo@example.com',
-    password: '$2a$10$rOzJqZqZqZqZqZqZqZqZqOqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZq', // hashed 'password123'
-    createdAt: new Date(),
-    updatedAt: new Date()
-  };
-  mockUsers.push(sampleUser);
+const initializeMockData = async () => {
+  const bcrypt = require('bcryptjs');
+  
+  // 5 mock users for login
+  const rawUsers = [
+    { name: 'Alice Demo', email: 'alice@example.com', password: 'Password1!' },
+    { name: 'Bob Demo', email: 'bob@example.com', password: 'Password2!' },
+    { name: 'Charlie Demo', email: 'charlie@example.com', password: 'Password3!' },
+    { name: 'Dave Demo', email: 'dave@example.com', password: 'Password4!' },
+    { name: 'Eve Demo', email: 'eve@example.com', password: 'Password5!' },
+  ];
+  
+  // Hash passwords and create users
+  for (const userData of rawUsers) {
+    const hashedPassword = await bcrypt.hash(userData.password, 10);
+    const user = {
+      _id: generateId(),
+      name: userData.name,
+      email: userData.email,
+      password: hashedPassword,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    mockUsers.push(user);
+  }
   
   // Create sample events
   const sampleEvent1 = {

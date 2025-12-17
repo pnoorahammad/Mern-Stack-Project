@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
-const User = require('../models/User');
+const supabase = require('../supabaseClient');
 
 // Generate JWT Token
 const generateToken = (userId) => {
@@ -28,22 +29,49 @@ router.post('/register', [
     const { name, email, password } = req.body;
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .single();
+
     if (existingUser) {
       return res.status(400).json({ message: 'User already exists with this email' });
     }
 
+    // Hash password
+    const passwordHash = await bcrypt.hash(password, 10);
+
     // Create new user
-    const user = new User({ name, email, password });
-    await user.save();
+    const { data: user, error } = await supabase
+      .from('users')
+      .insert({
+        name,
+        email,
+        password_hash: passwordHash
+      })
+      .select('id, name, email')
+      .single();
+
+    if (error) {
+      console.error('Supabase error:', error);
+      console.error('Error details:', JSON.stringify(error, null, 2));
+      return res.status(500).json({ 
+        message: 'Server error during registration',
+        error: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint
+      });
+    }
 
     // Generate token
-    const token = generateToken(user._id);
+    const token = generateToken(user.id);
 
     res.status(201).json({
       token,
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email
       }
@@ -70,24 +98,29 @@ router.post('/login', [
     const { email, password } = req.body;
 
     // Find user
-    const user = await User.findOne({ email });
-    if (!user) {
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, email, password_hash')
+      .eq('email', email)
+      .single();
+
+    if (error || !user) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
     // Check password
-    const isMatch = await user.comparePassword(password);
+    const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
     // Generate token
-    const token = generateToken(user._id);
+    const token = generateToken(user.id);
 
     res.json({
       token,
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email
       }
@@ -99,4 +132,3 @@ router.post('/login', [
 });
 
 module.exports = router;
-

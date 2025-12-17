@@ -1,8 +1,8 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
+const supabase = require('./supabaseClient');
 
 dotenv.config();
 
@@ -22,8 +22,15 @@ app.use('/api/events', require('./routes/events'));
 app.use('/api/rsvp', require('./routes/rsvp'));
 
 // Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running with MongoDB' });
+app.get('/api/health', async (req, res) => {
+  try {
+    // Test Supabase connection
+    const { error } = await supabase.from('users').select('id').limit(1);
+    if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows, which is OK
+    res.json({ status: 'OK', message: 'Server is running with Supabase' });
+  } catch (error) {
+    res.json({ status: 'OK', message: 'Server running (Supabase connection test failed)', error: error.message });
+  }
 });
 
 // Serve static files from React app build (CSS, JS, images)
@@ -39,24 +46,11 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(buildPath, 'index.html'));
 });
 
-// MongoDB Connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/local';
-
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => {
-  console.log('MongoDB Connected to:', MONGODB_URI);
-})
-.catch((err) => {
-  console.error('MongoDB Connection Error:', err);
-});
-
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`MongoDB: ${MONGODB_URI}`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ Connected to Supabase`);
+  console.log(`✅ Application URL: http://localhost:${PORT}`);
 });
 

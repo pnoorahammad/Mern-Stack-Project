@@ -100,15 +100,15 @@ const EventDetails = () => {
     return <div className="no-event">Event not found</div>;
   }
 
-  const isCreator = user && event.creator._id === user.id;
-  const hasRSVPd = user && event.attendees.some(attendee => attendee._id === user.id);
-  const isFull = event.attendees.length >= event.capacity;
+  const isCreator = user && event.creator?.id === user.id;
+  const hasRSVPd = user && event.attendees?.some(attendee => attendee.id === user.id);
+  const isFull = (event.attendeesCount || event.attendees?.length || 0) >= event.capacity;
   const isPast = new Date(event.date) < new Date();
   
   // Check if RSVP is open (1 minute after creation - respect time)
-  const rsvpOpenAt = event.rsvpOpenAt 
-    ? new Date(event.rsvpOpenAt) 
-    : new Date(new Date(event.createdAt || Date.now()).getTime() + 60 * 1000);
+  const rsvpOpenAt = event.rsvp_open_at 
+    ? new Date(event.rsvp_open_at) 
+    : new Date(new Date(event.created_at || Date.now()).getTime() + 60 * 1000);
   const canRSVP = new Date() >= rsvpOpenAt;
   const waitTime = canRSVP ? 0 : Math.ceil((rsvpOpenAt.getTime() - new Date().getTime()) / 1000);
 
@@ -137,7 +137,7 @@ const EventDetails = () => {
                   <FiMapPin /> {event.location}
                 </span>
                 <span>
-                  <FiUsers /> {event.attendees.length} / {event.capacity} attendees
+                  <FiUsers /> {event.attendeesCount || event.attendees?.length || 0} / {event.capacity} attendees
                 </span>
               </div>
               <div className="event-description">
@@ -209,13 +209,13 @@ const EventDetails = () => {
           </div>
           <div className="event-sidebar">
             <div className="attendees-card card">
-              <h3>Attendees ({event.attendees.length})</h3>
-              {event.attendees.length === 0 ? (
+              <h3>Attendees ({event.attendeesCount || event.attendees?.length || 0})</h3>
+              {(!event.attendees || event.attendees.length === 0) ? (
                 <p className="no-attendees">No attendees yet</p>
               ) : (
                 <div className="attendees-list">
                   {event.attendees.map((attendee) => (
-                    <div key={attendee._id} className="attendee-item">
+                    <div key={attendee.id || attendee._id} className="attendee-item">
                       <FiUser /> {attendee.name}
                     </div>
                   ))}
