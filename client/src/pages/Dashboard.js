@@ -23,13 +23,21 @@ const Dashboard = () => {
       setLoading(true);
       if (activeTab === 'attending') {
         const response = await api.get('/rsvp/user');
-        setAttendingEvents(response.data);
+        const eventsData = Array.isArray(response.data) ? response.data : [];
+        setAttendingEvents(eventsData);
       } else {
         const response = await api.get('/rsvp/user/created');
-        setCreatedEvents(response.data);
+        const eventsData = Array.isArray(response.data) ? response.data : [];
+        setCreatedEvents(eventsData);
       }
     } catch (error) {
       console.error('Error fetching events:', error);
+      // Set empty arrays on error
+      if (activeTab === 'attending') {
+        setAttendingEvents([]);
+      } else {
+        setCreatedEvents([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -85,7 +93,7 @@ const Dashboard = () => {
 
         {loading ? (
           <div className="loading">Loading...</div>
-        ) : events.length === 0 ? (
+        ) : !Array.isArray(events) || events.length === 0 ? (
           <div className="no-events">
             <p>No {activeTab === 'attending' ? 'events you\'re attending' : 'events created'} yet.</p>
             {activeTab === 'created' && (

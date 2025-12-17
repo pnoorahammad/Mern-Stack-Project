@@ -16,11 +16,19 @@ const Home = () => {
   }, []);
 
   useEffect(() => {
+    // Ensure events is an array before filtering
+    if (!Array.isArray(events)) {
+      setFilteredEvents([]);
+      return;
+    }
+
     if (searchTerm) {
       const filtered = events.filter(event =>
-        event.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        event.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        event.location.toLowerCase().includes(searchTerm.toLowerCase())
+        event && event.title && (
+          event.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          (event.description && event.description.toLowerCase().includes(searchTerm.toLowerCase())) ||
+          (event.location && event.location.toLowerCase().includes(searchTerm.toLowerCase()))
+        )
       );
       setFilteredEvents(filtered);
     } else {
@@ -31,10 +39,15 @@ const Home = () => {
   const fetchEvents = async () => {
     try {
       const response = await api.get('/events');
-      setEvents(response.data);
-      setFilteredEvents(response.data);
+      // Ensure response.data is an array
+      const eventsData = Array.isArray(response.data) ? response.data : [];
+      setEvents(eventsData);
+      setFilteredEvents(eventsData);
     } catch (error) {
       console.error('Error fetching events:', error);
+      // Set empty array on error to prevent map errors
+      setEvents([]);
+      setFilteredEvents([]);
     } finally {
       setLoading(false);
     }
@@ -72,7 +85,7 @@ const Home = () => {
           </div>
         </div>
 
-        {filteredEvents.length === 0 ? (
+        {!Array.isArray(filteredEvents) || filteredEvents.length === 0 ? (
           <div className="no-events">
             <p>No events found. {searchTerm && 'Try a different search term.'}</p>
           </div>
